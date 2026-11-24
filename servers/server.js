@@ -53,29 +53,96 @@ const cleanName = n =>
   String(n || "").replace(/[<>]/g, "").trim().slice(0, 16) || "Гравець";
 
 const send = (ws, o) => {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify(o));
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify(o));
+  }
 };
+
+function removePlayer(ws) {
+  const code = ws.room;
+  if (!code) return;
+
+  const room = rooms.get(code);
+  ws.room = null;
+  ws.role = null;
+
+  if (!room) return;
+
+  if (room.host === ws) {
+    send(room.guest, { t: "left" });
+    if (room.guest) {
+      room.guest.room = null;
+      room.guest.role = null;
+    }
+    rooms.delete(code);
+    return;
+  }
+
+  if (room.guest === ws) {
+    room.guest = null;
+    send(room.host, { t: "left" });
+  }
+
+  if (!room.host && !room.guest) {
+    rooms.delete(code);
+  }
+}
+
+function getRooms() {
+  const list = [];
+
+  for (const [code, room] of rooms) {
+    if (
+      room.host?.readyState === 1 &&
+      !room.guest
+    ) {
+      list.push({
+        code,
+        host: room.host.name || "Гравець",
+        players: 1,
+        maxPlayers: 2
+      });
+    }
+  }
+
+  return list;
+}
 
 wss.on("connection", ws => {
   ws.isAlive = true;
   ws.room = null;
   ws.role = null;
 
-  ws.on("pong", () => ws.isAlive = true);
+  ws.on("pong", () => {
+    ws.isAlive = true;
+  });
 
   ws.on("message", raw => {
     let m;
-    try { m = JSON.parse(raw); } catch { return; }
+
+    try {
+      m = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+
     if (!m || typeof m.t !== "string") return;
 
     if (m.t === "create" && !ws.room) {
       const code = newCode();
-      if (!code) return send(ws, { t: "error", e: "busy" });
+
+      if (!code) {
+        return send(ws, { t: "error", e: "busy" });
+      }
 
       ws.room = code;
       ws.role = "host";
       ws.name = cleanName(m.name);
-      rooms.set(code, { host: ws, guest: null });
+
+      rooms.set(code, {
+        host: ws,
+        guest: null
+      });
 
       return send(ws, { t: "created", code });
     }
@@ -85,33 +152,40 @@ wss.on("connection", ws => {
       const r = rooms.get(code);
 
       if (!r) return send(ws, { t: "error", e: "no_room" });
-      if (r.guest) return send(ws, { t: "error", e: "full" });
+
+      if (r.guest || !r.host || r.host.readyState !== 1) {
+        return send(ws, { t: "error", e: "full" });
+      }
 
       r.guest = ws;
       ws.room = code;
       ws.role = "guest";
       ws.name = cleanName(m.name);
 
-      send(ws, { t: "joined", code, peer: r.host.name });
-      send(r.host, { t: "peer", name: ws.name });
+      send(ws, {
+        t: "joined",
+        code,
+        peer: r.host.name
+      });
+
+      send(r.host, {
+        t: "peer",
+        name: ws.name
+      });
+
       return;
     }
 
     if (m.t === "list_rooms") {
-      const list = [];
+      return send(ws, {
+        t: "rooms_list",
+        rooms: getRooms()
+      });
+    }
 
-      for (const [code, room] of rooms) {
-        if (room.host?.readyState === 1 && !room.guest) {
-          list.push({
-            code,
-            host: room.host.name,
-            players: 1,
-            maxPlayers: 2
-          });
-        }
-      }
-
-      return send(ws, { t: "rooms_list", rooms: list });
+    if (m.t === "leave") {
+      removePlayer(ws);
+      return send(ws, { t: "left" });
     }
 
     const r = rooms.get(ws.room);
@@ -121,31 +195,23 @@ wss.on("connection", ws => {
     send(other, m);
   });
 
-  ws.on("close", () => {
-    const code = ws.room;
-    if (!code) return;
+  ws.on("close", () => removePlayer(ws));
 
-    const r = rooms.get(code);
-    if (!r) return;
-
-    const other = ws.role === "host" ? r.guest : r.host;
-    send(other, { t: "left" });
-
-    if (other) {
-      other.room = null;
-      other.role = null;
-    }
-
-    rooms.delete(code);
-  });
+  ws.on("error", () => removePlayer(ws));
 });
 
 setInterval(() => {
   wss.clients.forEach(ws => {
-    if (!ws.isAlive) return ws.terminate();
+    if (!ws.isAlive) {
+      return ws.terminate();
+    }
+
     ws.isAlive = false;
     ws.ping();
   });
 }, 30000);
 
-server.listen(PORT, () => console.log("Server on port " + PORT));
+server.listen(PORT, () => {
+  console.log("Server on port " + PORT);
+});
+        
