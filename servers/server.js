@@ -7,19 +7,12 @@ const rooms = new Map();
 
 const server = http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    return res.end();
-  }
 
   if (req.method === "GET" && req.url === "/rooms") {
     const list = [];
 
     for (const [code, room] of rooms) {
-      if (room.host && room.host.readyState === 1 && !room.guest) {
+      if (room.host?.readyState === 1 && !room.guest) {
         list.push({
           code,
           host: room.host.name || "Гравець",
@@ -72,12 +65,7 @@ wss.on("connection", ws => {
 
   ws.on("message", raw => {
     let m;
-    try {
-      m = JSON.parse(raw);
-    } catch {
-      return;
-    }
-
+    try { m = JSON.parse(raw); } catch { return; }
     if (!m || typeof m.t !== "string") return;
 
     if (m.t === "create" && !ws.room) {
@@ -87,7 +75,6 @@ wss.on("connection", ws => {
       ws.room = code;
       ws.role = "host";
       ws.name = cleanName(m.name);
-
       rooms.set(code, { host: ws, guest: null });
 
       return send(ws, { t: "created", code });
@@ -107,7 +94,6 @@ wss.on("connection", ws => {
 
       send(ws, { t: "joined", code, peer: r.host.name });
       send(r.host, { t: "peer", name: ws.name });
-
       return;
     }
 
@@ -115,7 +101,7 @@ wss.on("connection", ws => {
       const list = [];
 
       for (const [code, room] of rooms) {
-        if (room.host && room.host.readyState === 1 && !room.guest) {
+        if (room.host?.readyState === 1 && !room.guest) {
           list.push({
             code,
             host: room.host.name,
@@ -143,7 +129,6 @@ wss.on("connection", ws => {
     if (!r) return;
 
     const other = ws.role === "host" ? r.guest : r.host;
-
     send(other, { t: "left" });
 
     if (other) {
@@ -163,7 +148,4 @@ setInterval(() => {
   });
 }, 30000);
 
-server.listen(PORT, () => {
-  console.log("Server on port " + PORT);
-});
-        
+server.listen(PORT, () => console.log("Server on port " + PORT));
