@@ -8,53 +8,55 @@ const rooms = new Map();
 const server = http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
 
-  if (req.method === "GET" && req.url === "/rooms") {
-    const list = [];
+  cleanupRooms();
 
-    for (const [code, room] of rooms) {
-      if (room.host?.readyState === 1 && !room.guest) {
-        list.push({
-          code,
-          host: room.host.name || "Гравець",
-          players: 1,
-          maxPlayers: 2
-        });
-      }
-    }
+  if (req.method === "GET" && req.url === "/rooms") {
+    const list = getRooms();
 
     res.writeHead(200, {
       "Content-Type": "application/json; charset=utf-8"
     });
+
     return res.end(JSON.stringify(list));
   }
 
   res.writeHead(200, {
     "Content-Type": "text/plain; charset=utf-8"
   });
+
   res.end("Pes Romashka server OK. Кімнат: " + rooms.size);
 });
 
-const wss = new WebSocketServer({ server, maxPayload: 8 * 1024 });
+const wss = new WebSocketServer({
+  server,
+  maxPayload: 8 * 1024
+});
 
 const ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ";
 
 function newCode() {
   for (let k = 0; k < 50; k++) {
-    let c = "";
+    let code = "";
+
     for (let i = 0; i < 4; i++) {
-      c += ALPHA[Math.floor(Math.random() * ALPHA.length)];
+      code += ALPHA[Math.floor(Math.random() * ALPHA.length)];
     }
-    if (!rooms.has(c)) return c;
+
+    if (!rooms.has(code)) return code;
   }
+
   return null;
 }
 
 const cleanName = n =>
-  String(n || "").replace(/[<>]/g, "").trim().slice(0, 16) || "Гравець";
+  String(n || "")
+    .replace(/[<>]/g, "")
+    .trim()
+    .slice(0, 16) || "Гравець";
 
-const send = (ws, o) => {
+const send = (ws, data) => {
   if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify(o));
+    ws.send(JSON.stringify(data));
   }
 };
 
@@ -63,6 +65,7 @@ function removePlayer(ws) {
   if (!code) return;
 
   const room = rooms.get(code);
+
   ws.room = null;
   ws.role = null;
 
@@ -70,10 +73,12 @@ function removePlayer(ws) {
 
   if (room.host === ws) {
     send(room.guest, { t: "left" });
+
     if (room.guest) {
       room.guest.room = null;
       room.guest.role = null;
     }
+
     rooms.delete(code);
     return;
   }
@@ -88,7 +93,38 @@ function removePlayer(ws) {
   }
 }
 
+function cleanupRooms() {
+  for (const [code, room] of rooms) {
+    const hostAlive =
+      room.host && room.host.readyState === 1;
+
+    const guestAlive =
+      room.guest && room.guest.readyState === 1;
+
+    if (!hostAlive) {
+      if (room.guest) {
+        send(room.guest, { t: "left" });
+        room.guest.room = null;
+        room.guest.role = null;
+      }
+
+      rooms.delete(code);
+      continue;
+    }
+
+    if (room.guest && !guestAlive) {
+      room.guest.room = null;
+      room.guest.role = null;
+      room.guest = null;
+
+      send(room.host, { t: "left" });
+    }
+  }
+}
+
 function getRooms() {
+  cleanupRooms();
+
   const list = [];
 
   for (const [code, room] of rooms) {
@@ -144,20 +180,32 @@ wss.on("connection", ws => {
         guest: null
       });
 
-      return send(ws, { t: "created", code });
+      return send(ws, {
+        t: "created",
+        code
+      });
     }
 
     if (m.t === "join" && !ws.room) {
-      const code = String(m.code || "").toUpperCase().trim();
-      const r = rooms.get(code);
+      const code = String(m.code || "")
+        .toUpperCase()
+        .trim();
 
-      if (!r) return send(ws, { t: "error", e: "no_room" });
+      const room = rooms.get(code);
 
-      if (r.guest || !r.host || r.host.readyState !== 1) {
+      if (!room) {
+        return send(ws, { t: "error", e: "no_room" });
+      }
+
+      if (
+        room.guest ||
+        !room.host ||
+        room.host.readyState !== 1
+      ) {
         return send(ws, { t: "error", e: "full" });
       }
 
-      r.guest = ws;
+      room.guest = ws;
       ws.room = code;
       ws.role = "guest";
       ws.name = cleanName(m.name);
@@ -165,10 +213,10 @@ wss.on("connection", ws => {
       send(ws, {
         t: "joined",
         code,
-        peer: r.host.name
+        peer: room.host.name
       });
 
-      send(r.host, {
+      send(room.host, {
         t: "peer",
         name: ws.name
       });
@@ -188,19 +236,20 @@ wss.on("connection", ws => {
       return send(ws, { t: "left" });
     }
 
-    const r = rooms.get(ws.room);
-    if (!r) return;
+    const room = rooms.get(ws.room);
+    if (!room) return;
 
-    const other = ws.role === "host" ? r.guest : r.host;
+    const other =
+      ws.role === "host" ? room.guest : room.host;
+
     send(other, m);
   });
 
   ws.on("close", () => removePlayer(ws));
-
   ws.on("error", () => removePlayer(ws));
 });
 
-setInterval(() => {
+const heartbeat = setInterval(() => {
   wss.clients.forEach(ws => {
     if (!ws.isAlive) {
       return ws.terminate();
@@ -209,9 +258,10 @@ setInterval(() => {
     ws.isAlive = false;
     ws.ping();
   });
-}, 30000);
+
+  cleanupRooms();
+}, 15000);
 
 server.listen(PORT, () => {
   console.log("Server on port " + PORT);
 });
-        
